@@ -206,4 +206,104 @@ final class Admin
         }
         redirect('/admin/sources');
     }
+
+    /** Reading habits for the logged-in admin (seen / opened / saved). */
+    public static function insights(): void
+    {
+        $user = Auth::requireAdmin();
+        $uid = (int) $user['id'];
+
+        $summary = q(
+            'SELECT
+                COUNT(*) AS touched,
+                SUM(CASE WHEN seen = 1 THEN 1 ELSE 0 END) AS seen,
+                SUM(CASE WHEN opened = 1 THEN 1 ELSE 0 END) AS opened,
+                SUM(CASE WHEN saved = 1 THEN 1 ELSE 0 END) AS saved_now,
+                SUM(CASE WHEN first_saved_at IS NOT NULL THEN 1 ELSE 0 END) AS ever_saved,
+                COALESCE(SUM(open_count), 0) AS open_events
+             FROM user_articles WHERE user_id = ?',
+            [$uid]
+        )->fetch() ?: [];
+
+        $order = q(
+            'SELECT
+                SUM(CASE WHEN first_opened_at IS NOT NULL AND first_saved_at IS NOT NULL AND first_opened_at < first_saved_at THEN 1 ELSE 0 END) AS opened_then_saved,
+                SUM(CASE WHEN first_opened_at IS NOT NULL AND first_saved_at IS NOT NULL AND first_saved_at < first_opened_at THEN 1 ELSE 0 END) AS saved_then_opened,
+                SUM(CASE WHEN first_opened_at IS NOT NULL AND first_saved_at IS NOT NULL AND first_opened_at = first_saved_at THEN 1 ELSE 0 END) AS same_moment,
+                SUM(CASE WHEN first_opened_at IS NOT NULL AND first_saved_at IS NULL THEN 1 ELSE 0 END) AS opened_never_saved,
+                SUM(CASE WHEN first_opened_at IS NULL AND first_saved_at IS NOT NULL THEN 1 ELSE 0 END) AS saved_never_opened
+             FROM user_articles WHERE user_id = ?',
+            [$uid]
+        )->fetch() ?: [];
+
+        $bySource = q(
+            'SELECT s.id, s.name, s.geo_group, s.language,
+                    COUNT(*) AS seen_n,
+                    SUM(CASE WHEN ua.opened = 1 THEN 1 ELSE 0 END) AS opened_n,
+                    COALESCE(SUM(ua.open_count), 0) AS open_events,
+                    SUM(CASE WHEN ua.saved = 1 THEN 1 ELSE 0 END) AS saved_n
+             FROM user_articles ua
+             JOIN articles a ON a.id = ua.article_id
+             JOIN sources s ON s.id = a.source_id
+             WHERE ua.user_id = ? AND ua.seen = 1
+             GROUP BY s.id
+             ORDER BY open_events DESC, opened_n DESC, seen_n DESC
+             LIMIT 25',
+            [$uid]
+        )->fetchAll();
+
+        $byCategory = q(
+            'SELECT a.category,
+                    COUNT(*) AS seen_n,
+                    SUM(CASE WHEN ua.opened = 1 THEN 1 ELSE 0 END) AS opened_n,
+                    COALESCE(SUM(ua.open_count), 0) AS open_events,
+                    SUM(CASE WHEN ua.saved = 1 THEN 1 ELSE 0 END) AS saved_n
+             FROM user_articles ua
+             JOIN articles a ON a.id = ua.article_id
+             WHERE ua.user_id = ? AND ua.seen = 1
+             GROUP BY a.category
+             ORDER BY open_events DESC, opened_n DESC, seen_n DESC',
+            [$uid]
+        )->fetchAll();
+
+        $byGeo = q(
+            'SELECT s.geo_group,
+                    COUNT(*) AS seen_n,
+                    SUM(CASE WHEN ua.opened = 1 THEN 1 ELSE 0 END) AS opened_n,
+                    COALESCE(SUM(ua.open_count), 0) AS open_events,
+                    SUM(CASE WHEN ua.saved = 1 THEN 1 ELSE 0 END) AS saved_n
+             FROM user_articles ua
+             JOIN articles a ON a.id = ua.article_id
+             JOIN sources s ON s.id = a.source_id
+             WHERE ua.user_id = ? AND ua.seen = 1
+             GROUP BY s.geo_group
+             ORDER BY open_events DESC, opened_n DESC, seen_n DESC',
+            [$uid]
+        )->fetchAll();
+
+        $recentOpens = q(
+            'SELECT a.id, a.title, a.url, a.category, a.published_at,
+                    s.name AS source_name, s.geo_group,
+                    ua.open_count, ua.first_opened_at, ua.last_opened_at,
+                    ua.saved, ua.first_saved_at, ua.saved_at, ua.note
+             FROM user_articles ua
+             JOIN articles a ON a.id = ua.article_id
+             JOIN sources s ON s.id = a.source_id
+             WHERE ua.user_id = ? AND ua.opened = 1
+             ORDER BY ua.last_opened_at DESC
+             LIMIT 40',
+            [$uid]
+        )->fetchAll();
+
+        view('admin/insights', [
+            'title' => 'Insights · ' . config('app_name'),
+            'bodyClass' => 'page-admin',
+            'summary' => $summary,
+            'order' => $order,
+            'bySource' => $bySource,
+            'byCategory' => $byCategory,
+            'byGeo' => $byGeo,
+            'recentOpens' => $recentOpens,
+        ]);
+    }
 }

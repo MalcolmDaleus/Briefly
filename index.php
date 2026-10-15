@@ -36,10 +36,18 @@ $routes = [
 
     'GET /api/feed' => [Api::class, 'feed'],
     'POST /api/seen' => [Api::class, 'seen'],
+    'POST /api/opened' => [Api::class, 'opened'],
     'POST /api/save' => [Api::class, 'save'],
+    'POST /api/note' => [Api::class, 'note'],
+    'POST /api/paywall-check' => [Api::class, 'paywallCheck'],
+    'POST /api/paywall-safe' => [Api::class, 'paywallSafe'],
+    'POST /api/dismiss' => [Api::class, 'dismiss'],
+    'GET /api/filters' => [Api::class, 'filters'],
+    'POST /api/filters' => [Api::class, 'filters'],
     'POST /api/theme' => [Api::class, 'theme'],
 
     'GET /admin' => [Admin::class, 'sources'],
+    'GET /admin/insights' => [Admin::class, 'insights'],
     'GET /admin/sources' => [Admin::class, 'sources'],
     'GET /admin/sources/new' => [Admin::class, 'newSource'],
     'POST /admin/sources/new' => [Admin::class, 'createSource'],

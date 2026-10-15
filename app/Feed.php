@@ -4,8 +4,9 @@ declare(strict_types=1);
 /**
  * Feed selection. Filters constrain the pool; a deterministic score decides the order.
  *
- *   pool   = approved sources, published within feed_window_days, unseen, not already
- *            in the client's window, matching category/keyword filters
+ *   pool   = approved sources, published within feed_window_days (or a tighter
+ *            "within" window), unseen, not already in the client's window,
+ *            matching keyword / category / geo / language filters (include or exclude)
  *   score  = recency (exponential decay)
  *          + story size bonus (widely covered stories rank a little higher)
  *          + keyword title bonus
@@ -22,16 +23,25 @@ final class Feed
     private const CONTEXT = 10;             // how far back repetition penalties look
     private const MAX_PER_SOURCE = 3;       // per batch
 
+    /** Allowed published-within windows: URL token => hours. */
+    public const WITHIN = [
+        '1h' => 1,
+        '3h' => 3,
+        '12h' => 12,
+        '24h' => 24,
+        '3d' => 72,
+        '7d' => 168,
+    ];
+
     public static function next(int $userId, array $opts): array
     {
         $limit = max(1, min(30, (int) ($opts['limit'] ?? config('feed_batch_size', 15))));
         $exclude = array_slice(array_values(array_filter(array_map('intval', $opts['exclude'] ?? []))), 0, 200);
         $context = array_slice(array_values(array_filter(array_map('intval', $opts['context'] ?? []))), -self::CONTEXT);
-        $category = isset(Categories::LABELS[$opts['category'] ?? '']) ? $opts['category'] : null;
-        $keywords = self::keywords((string) ($opts['q'] ?? ''));
+        $filters = self::normalizeFilters($opts);
         $includeSeen = !empty($opts['include_seen']);
 
-        $pool = self::pool($userId, $exclude, $category, $keywords, $includeSeen);
+        $pool = self::pool($userId, $exclude, $filters, $includeSeen);
         if (!$pool) {
             return [];
         }
@@ -91,9 +101,9 @@ final class Feed
             if ($closest >= 0.45) {
                 $score -= 45 * min(1.0, $closest);
             }
-            if ($keywords) {
+            if ($filters['keywords']) {
                 $title = search_text($a['title']);
-                foreach ($keywords as $k) {
+                foreach ($filters['keywords'] as $k) {
                     if (str_contains($title, ' ' . $k . ' ')) {
                         $score += 10;
                     }
@@ -175,31 +185,57 @@ final class Feed
         return array_sum($shared) / max(0.001, min(array_sum($a), array_sum($b)));
     }
 
-    private static function pool(int $userId, array $exclude, ?string $category, array $keywords, bool $includeSeen): array
+    /**
+     * @param array{categories: string[], category_mode: string, geos: string[], geo_mode: string, langs: string[], lang_mode: string, keywords: string[], within_hours: ?int} $filters
+     */
+    private static function pool(int $userId, array $exclude, array $filters, bool $includeSeen): array
     {
-        $where = ["a.published_at >= :since", "s.status = 'approved'", 's.is_active = 1'];
-        $params = ['uid' => $userId, 'since' => now_utc(-(int) config('feed_window_days', 7) * 86400)];
+        $windowHours = (int) config('feed_window_days', 7) * 24;
+        $hours = $filters['within_hours'] !== null ? min($filters['within_hours'], $windowHours) : $windowHours;
+        $where = [
+            "a.published_at >= :since",
+            "s.status = 'approved'",
+            's.is_active = 1',
+            "COALESCE(a.paywall_status, 'unknown') != 'paywalled'",
+            'COALESCE(ua.dismissed, 0) = 0',
+        ];
+        $params = ['uid' => $userId, 'since' => now_utc(-$hours * 3600)];
         if (!$includeSeen) {
             $where[] = '(ua.seen IS NULL OR ua.seen = 0)';
         }
         if ($exclude) {
             $where[] = 'a.id NOT IN (' . implode(',', $exclude) . ')';
         }
-        if ($category) {
-            $where[] = 'a.category = :cat';
-            $params['cat'] = $category;
+        self::applyListFilter($where, $params, 'a.category', 'cat', $filters['categories'], $filters['category_mode']);
+        self::applyListFilter($where, $params, 's.geo_group', 'geo', $filters['geos'], $filters['geo_mode']);
+        if ($filters['langs']) {
+            $placeholders = [];
+            foreach ($filters['langs'] as $i => $lang) {
+                $key = "lang{$i}";
+                $placeholders[] = ':' . $key;
+                $params[$key] = $lang;
+            }
+            $in = implode(', ', $placeholders);
+            if ($filters['lang_mode'] === 'exclude') {
+                // Missing language still passes an exclude filter.
+                $where[] = "(a.language IS NULL OR a.language = '' OR a.language NOT IN ({$in}))";
+            } else {
+                $where[] = "a.language IN ({$in})";
+            }
         }
-        if ($keywords) {
+        if ($filters['keywords']) {
             $or = [];
-            foreach ($keywords as $i => $k) {
+            foreach ($filters['keywords'] as $i => $k) {
                 $or[] = "a.search_text LIKE :k{$i}";
                 $params["k{$i}"] = '% ' . str_replace(['%', '_'], ['\\%', '\\_'], $k) . ' %';
             }
             $where[] = '(' . implode(' OR ', array_map(fn ($c) => $c . " ESCAPE '\\'", $or)) . ')';
         }
         $sql = 'SELECT a.id, a.source_id, a.title, a.url, a.excerpt, a.image_url, a.author, a.published_at, a.language, a.category, a.cluster_id, a.title_tokens,
+                       a.paywall_status, a.paywall_reason,
                        s.name AS source_name, s.domain AS source_domain, s.geo_group,
-                       COALESCE(ua.saved, 0) AS saved, COALESCE(ua.seen, 0) AS seen
+                       COALESCE(ua.saved, 0) AS saved, COALESCE(ua.seen, 0) AS seen,
+                       COALESCE(ua.opened, 0) AS opened, ua.note
                 FROM articles a
                 JOIN sources s ON s.id = a.source_id
                 LEFT JOIN user_articles ua ON ua.article_id = a.id AND ua.user_id = :uid
@@ -207,6 +243,64 @@ final class Feed
                 ORDER BY a.published_at DESC
                 LIMIT ' . (int) config('feed_pool_limit', 500);
         return q($sql, $params)->fetchAll();
+    }
+
+    /** @param list<string> $values */
+    private static function applyListFilter(array &$where, array &$params, string $column, string $prefix, array $values, string $mode): void
+    {
+        if (!$values) {
+            return;
+        }
+        $placeholders = [];
+        foreach ($values as $i => $value) {
+            $key = $prefix . $i;
+            $placeholders[] = ':' . $key;
+            $params[$key] = $value;
+        }
+        $in = implode(', ', $placeholders);
+        $where[] = $mode === 'exclude' ? "{$column} NOT IN ({$in})" : "{$column} IN ({$in})";
+    }
+
+    /** Normalize and validate filter opts from the API / client. */
+    public static function normalizeFilters(array $opts): array
+    {
+        $mode = static fn (string $key): string => (($opts[$key] ?? '') === 'exclude') ? 'exclude' : 'include';
+
+        $categories = self::listParam($opts['categories'] ?? ($opts['category'] ?? ''), array_keys(Categories::LABELS));
+        // Legacy single-category URL (?category=politics) still works.
+        if (!$categories && is_string($opts['category'] ?? null) && isset(Categories::LABELS[$opts['category']])) {
+            $categories = [$opts['category']];
+        }
+
+        $withinToken = (string) ($opts['within'] ?? '');
+        $withinHours = self::WITHIN[$withinToken] ?? null;
+
+        return [
+            'categories' => $categories,
+            'category_mode' => $mode('category_mode'),
+            'geos' => self::listParam($opts['geos'] ?? ($opts['geo'] ?? ''), array_keys(Sources::GEO)),
+            'geo_mode' => $mode('geo_mode'),
+            'langs' => self::listParam($opts['langs'] ?? ($opts['lang'] ?? ''), array_keys(Sources::LANGUAGES)),
+            'lang_mode' => $mode('lang_mode'),
+            'keywords' => self::keywords((string) ($opts['q'] ?? '')),
+            'within_hours' => $withinHours,
+            'within' => $withinHours !== null ? $withinToken : '',
+        ];
+    }
+
+    /** @param list<string>|string $raw @param list<string> $allowed */
+    private static function listParam(array|string $raw, array $allowed): array
+    {
+        $parts = is_array($raw) ? $raw : explode(',', $raw);
+        $allowedFlip = array_flip($allowed);
+        $out = [];
+        foreach ($parts as $part) {
+            $part = trim((string) $part);
+            if ($part !== '' && isset($allowedFlip[$part])) {
+                $out[] = $part;
+            }
+        }
+        return array_values(array_unique($out));
     }
 
     private static function clusterSizes(array $clusterIds, string $since): array
@@ -267,7 +361,138 @@ final class Feed
             'cluster_size' => (int) ($a['cluster_size'] ?? 1),
             'saved' => (bool) $a['saved'],
             'seen' => (bool) $a['seen'],
+            'opened' => (bool) ($a['opened'] ?? false),
+            'note' => $a['note'] ?? null,
+            'paywall_status' => $a['paywall_status'] ?? Paywall::UNKNOWN,
+            'paywall_reason' => $a['paywall_reason'] ?? null,
+            'source_id' => (int) $a['source_id'],
         ];
+    }
+
+    /** Hide an article from this user's feed (and optionally mark the article paywalled). */
+    public static function dismiss(int $userId, int $articleId, bool $markPaywalled = false): bool
+    {
+        if (!q('SELECT 1 FROM articles WHERE id = ?', [$articleId])->fetchColumn()) {
+            return false;
+        }
+        $now = now_utc();
+        q(
+            'INSERT INTO user_articles (user_id, article_id, seen, dismissed, first_seen_at, created_at, updated_at)
+             VALUES (:uid, :aid, 1, 1, :now, :now, :now)
+             ON CONFLICT (user_id, article_id) DO UPDATE SET dismissed = 1, seen = 1,
+                first_seen_at = COALESCE(first_seen_at, excluded.first_seen_at), updated_at = excluded.updated_at',
+            ['uid' => $userId, 'aid' => $articleId, 'now' => $now]
+        );
+        if ($markPaywalled) {
+            Paywall::store($articleId, Paywall::PAYWALLED, 'Marked after paywall warning');
+        }
+        return true;
+    }
+
+    /** Check (or reuse) paywall status for an article the user is about to open. */
+    public static function paywallCheck(int $articleId): ?array
+    {
+        $row = q(
+            'SELECT a.id, a.url, a.source_id, a.paywall_status, a.paywall_reason, a.paywall_checked_at,
+                    COALESCE(s.paywall_safe, 0) AS paywall_safe
+             FROM articles a JOIN sources s ON s.id = a.source_id WHERE a.id = ?',
+            [$articleId]
+        )->fetch();
+        if (!$row) {
+            return null;
+        }
+        if ((int) $row['paywall_safe'] === 1) {
+            Paywall::store((int) $row['id'], Paywall::FREE, 'Source marked safe');
+            return [
+                'id' => (int) $row['id'],
+                'url' => $row['url'],
+                'source_id' => (int) $row['source_id'],
+                'status' => Paywall::FREE,
+                'reason' => 'Source marked safe — skipping paywall check',
+                'cached' => true,
+            ];
+        }
+        $status = $row['paywall_status'] ?: Paywall::UNKNOWN;
+        // Only cache "free" — paywalled/likely are rechecked so tighter markers can clear FPs.
+        $freshFree = $status === Paywall::FREE
+            && $row['paywall_checked_at']
+            && strtotime($row['paywall_checked_at'] . ' UTC') > time() - 7 * 86400;
+
+        if ($freshFree) {
+            return [
+                'id' => (int) $row['id'],
+                'url' => $row['url'],
+                'source_id' => (int) $row['source_id'],
+                'status' => $status,
+                'reason' => $row['paywall_reason'],
+                'cached' => true,
+            ];
+        }
+
+        $result = Paywall::checkUrl($row['url']);
+        // Don't overwrite a firm RSS paywalled label with "unknown" from a failed fetch.
+        if (!($status === Paywall::PAYWALLED && $result['status'] === Paywall::UNKNOWN)) {
+            Paywall::store((int) $row['id'], $result['status'], $result['reason']);
+            $status = $result['status'];
+        }
+        return [
+            'id' => (int) $row['id'],
+            'url' => $row['url'],
+            'source_id' => (int) $row['source_id'],
+            'status' => $status,
+            'reason' => $result['reason'] ?? $row['paywall_reason'],
+            'cached' => false,
+        ];
+    }
+
+    /** False-positive override: this source is fine; stop checking its pages. */
+    public static function markSourceSafe(int $articleId): ?array
+    {
+        $row = q('SELECT id, source_id, url FROM articles WHERE id = ?', [$articleId])->fetch();
+        if (!$row) {
+            return null;
+        }
+        Paywall::markSourceSafe((int) $row['source_id']);
+        Paywall::store((int) $row['id'], Paywall::FREE, 'Source marked safe');
+        return [
+            'id' => (int) $row['id'],
+            'source_id' => (int) $row['source_id'],
+            'url' => $row['url'],
+            'status' => Paywall::FREE,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    public static function getUserFilters(int $userId): array
+    {
+        $raw = q('SELECT feed_filters FROM users WHERE id = ?', [$userId])->fetchColumn();
+        if (!$raw || !is_string($raw)) {
+            return [];
+        }
+        $data = json_decode($raw, true);
+        return is_array($data) ? $data : [];
+    }
+
+    public static function saveUserFilters(int $userId, array $opts): array
+    {
+        $filters = self::normalizeFilters($opts);
+        $store = [
+            'q' => (string) ($opts['q'] ?? ''),
+            'category' => implode(',', $filters['categories']),
+            'category_mode' => $filters['category_mode'],
+            'geo' => implode(',', $filters['geos']),
+            'geo_mode' => $filters['geo_mode'],
+            'lang' => implode(',', $filters['langs']),
+            'lang_mode' => $filters['lang_mode'],
+            'within' => $filters['within'],
+        ];
+        // Drop empty fields so the JSON stays small.
+        $store = array_filter($store, static fn ($v) => $v !== '' && $v !== null);
+        q(
+            'UPDATE users SET feed_filters = ?, updated_at = ? WHERE id = ?',
+            [$store ? json_encode($store, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null, now_utc(), $userId]
+        );
+        return $store;
     }
 
     // -----------------------------------------------------------------------
@@ -301,22 +526,74 @@ final class Feed
         $now = now_utc();
         if ($saved) {
             q(
-                'INSERT INTO user_articles (user_id, article_id, seen, saved, first_seen_at, saved_at, created_at, updated_at)
-                 VALUES (:uid, :aid, 1, 1, :now, :now, :now, :now)
-                 ON CONFLICT (user_id, article_id) DO UPDATE SET saved = 1, seen = 1, saved_at = COALESCE(saved_at, excluded.saved_at),
-                    first_seen_at = COALESCE(first_seen_at, excluded.first_seen_at), updated_at = excluded.updated_at',
+                'INSERT INTO user_articles (user_id, article_id, seen, saved, first_seen_at, first_saved_at, saved_at, created_at, updated_at)
+                 VALUES (:uid, :aid, 1, 1, :now, :now, :now, :now, :now)
+                 ON CONFLICT (user_id, article_id) DO UPDATE SET saved = 1, seen = 1,
+                    saved_at = COALESCE(saved_at, excluded.saved_at),
+                    first_saved_at = COALESCE(first_saved_at, excluded.first_saved_at),
+                    first_seen_at = COALESCE(first_seen_at, excluded.first_seen_at),
+                    updated_at = excluded.updated_at',
                 ['uid' => $userId, 'aid' => $articleId, 'now' => $now]
             );
         } else {
-            q('UPDATE user_articles SET saved = 0, saved_at = NULL, updated_at = ? WHERE user_id = ? AND article_id = ?', [$now, $userId, $articleId]);
+            q('UPDATE user_articles SET saved = 0, saved_at = NULL, note = NULL, updated_at = ? WHERE user_id = ? AND article_id = ?', [$now, $userId, $articleId]);
         }
+        return true;
+    }
+
+    /** Record a click-through to the original article (image, title, or Read button). */
+    public static function markOpened(int $userId, array $articleIds): int
+    {
+        $ids = array_slice(array_values(array_unique(array_filter(array_map('intval', $articleIds)))), 0, 50);
+        if (!$ids) {
+            return 0;
+        }
+        $now = now_utc();
+        $stmt = db()->prepare(
+            'INSERT INTO user_articles (user_id, article_id, seen, opened, open_count, first_seen_at, first_opened_at, last_opened_at, created_at, updated_at)
+             SELECT :uid, id, 1, 1, 1, :now, :now, :now, :now, :now FROM articles WHERE id = :aid
+             ON CONFLICT (user_id, article_id) DO UPDATE SET
+                seen = 1,
+                opened = 1,
+                open_count = open_count + 1,
+                first_seen_at = COALESCE(first_seen_at, excluded.first_seen_at),
+                first_opened_at = COALESCE(first_opened_at, excluded.first_opened_at),
+                last_opened_at = excluded.last_opened_at,
+                updated_at = excluded.updated_at'
+        );
+        Db::transaction(function () use ($stmt, $ids, $userId, $now) {
+            foreach ($ids as $id) {
+                $stmt->execute(['uid' => $userId, 'aid' => $id, 'now' => $now]);
+            }
+        });
+        return count($ids);
+    }
+
+    /** Set or clear the note on a saved article. Empty string clears it. */
+    public static function setNote(int $userId, int $articleId, string $note): bool
+    {
+        $note = trim($note);
+        if (mb_strlen($note) > 2000) {
+            $note = mb_substr($note, 0, 2000);
+        }
+        $row = q(
+            'SELECT saved FROM user_articles WHERE user_id = ? AND article_id = ?',
+            [$userId, $articleId]
+        )->fetch();
+        if (!$row || !(int) $row['saved']) {
+            return false;
+        }
+        q(
+            'UPDATE user_articles SET note = ?, updated_at = ? WHERE user_id = ? AND article_id = ?',
+            [$note === '' ? null : $note, now_utc(), $userId, $articleId]
+        );
         return true;
     }
 
     public static function saved(int $userId): array
     {
         return q(
-            'SELECT a.id, a.title, a.url, a.excerpt, a.image_url, a.author, a.published_at, a.category, s.name AS source_name, s.domain AS source_domain, s.geo_group, ua.saved_at
+            'SELECT a.id, a.title, a.url, a.excerpt, a.image_url, a.author, a.published_at, a.category, s.name AS source_name, s.domain AS source_domain, s.geo_group, ua.saved_at, ua.note
              FROM user_articles ua JOIN articles a ON a.id = ua.article_id JOIN sources s ON s.id = a.source_id
              WHERE ua.user_id = ? AND ua.saved = 1 ORDER BY ua.saved_at DESC',
             [$userId]

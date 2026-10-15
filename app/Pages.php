@@ -19,10 +19,24 @@ final class Pages
     public static function feed(): void
     {
         Auth::requireUser();
+        $geos = [];
+        foreach (Sources::GEO as $key => $info) {
+            $geos[$key] = $info[1];
+        }
         view('feed', [
             'title' => config('app_name'),
             'bodyClass' => 'page-feed',
-            'categories' => array_diff_key(Categories::LABELS, ['general' => true]),
+            'categories' => Categories::LABELS,
+            'geos' => $geos,
+            'languages' => Sources::LANGUAGES,
+            'withinOptions' => [
+                '1h' => '1 hour',
+                '3h' => '3 hours',
+                '12h' => '12 hours',
+                '24h' => '24 hours',
+                '3d' => '3 days',
+                '7d' => '7 days',
+            ],
             'batchSize' => (int) config('feed_batch_size', 15),
         ]);
     }

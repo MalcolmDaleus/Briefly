@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     theme         TEXT NOT NULL DEFAULT 'system',      -- system | light | dark
     is_admin      INTEGER NOT NULL DEFAULT 0,
+    feed_filters  TEXT,                                 -- JSON of the user's feed filter sheet
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS sources (
     default_category TEXT,
     status           TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | blocked
     is_active        INTEGER NOT NULL DEFAULT 1,        -- disabled/enabled independently of approval
+    paywall_safe     INTEGER NOT NULL DEFAULT 0,        -- skip HTML paywall checks (false-positive override)
     access_status    TEXT NOT NULL DEFAULT 'unknown',   -- unknown | ok | failing | denied
     discovered_via   TEXT,                              -- seed | manual | discovery:<how>
     discovered_at    TEXT,
@@ -70,6 +72,9 @@ CREATE TABLE IF NOT EXISTS articles (
     search_text    TEXT NOT NULL DEFAULT '',            -- folded title/excerpt/tags for keyword filtering
     title_tokens   TEXT NOT NULL DEFAULT '',            -- clustering tokens
     cluster_id     INTEGER,                             -- id of the first article in the story cluster
+    paywall_status TEXT NOT NULL DEFAULT 'unknown',     -- unknown | free | likely | paywalled
+    paywall_reason TEXT,
+    paywall_checked_at TEXT,
     retrieved_at   TEXT NOT NULL,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
@@ -81,16 +86,25 @@ CREATE INDEX IF NOT EXISTS idx_articles_title ON articles (source_id, title_hash
 CREATE INDEX IF NOT EXISTS idx_articles_external ON articles (source_id, external_id);
 
 CREATE TABLE IF NOT EXISTS user_articles (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    article_id    INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
-    seen          INTEGER NOT NULL DEFAULT 0,
-    saved         INTEGER NOT NULL DEFAULT 0,
-    first_seen_at TEXT,
-    saved_at      TEXT,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    article_id      INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    seen            INTEGER NOT NULL DEFAULT 0,
+    saved           INTEGER NOT NULL DEFAULT 0,
+    opened          INTEGER NOT NULL DEFAULT 0,        -- clicked through to the original article
+    open_count      INTEGER NOT NULL DEFAULT 0,
+    note            TEXT,                               -- optional note on a saved article
+    first_seen_at   TEXT,
+    first_opened_at TEXT,
+    last_opened_at  TEXT,
+    first_saved_at  TEXT,                               -- kept even after unsaving
+    saved_at        TEXT,                               -- set while currently saved; cleared on unsave
+    dismissed       INTEGER NOT NULL DEFAULT 0,         -- user removed it from their feed (e.g. paywall)
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
     UNIQUE (user_id, article_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_articles_saved ON user_articles (user_id, saved, saved_at);
 CREATE INDEX IF NOT EXISTS idx_user_articles_article ON user_articles (article_id, seen);
+CREATE INDEX IF NOT EXISTS idx_user_articles_opened ON user_articles (user_id, opened, open_count);
+CREATE INDEX IF NOT EXISTS idx_articles_paywall ON articles (paywall_status);

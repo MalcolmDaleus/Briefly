@@ -19,6 +19,7 @@ final class Retrieval
         return (int) q(
             "SELECT COUNT(*) FROM articles a JOIN sources s ON s.id = a.source_id
              WHERE a.published_at >= ? AND s.status = 'approved' AND s.is_active = 1
+               AND COALESCE(a.paywall_status, 'unknown') != 'paywalled'
                AND NOT EXISTS (SELECT 1 FROM user_articles ua WHERE ua.article_id = a.id AND ua.seen = 1)",
             [$since]
         )->fetchColumn();
@@ -89,9 +90,10 @@ final class Retrieval
     {
         $since = now_utc(-(int) config('pool_fresh_hours', 24) * 3600);
         $rows = q(
-            'SELECT a.source_id, COUNT(*) AS n FROM articles a
-             WHERE a.published_at >= ? AND NOT EXISTS (SELECT 1 FROM user_articles ua WHERE ua.article_id = a.id AND ua.seen = 1)
-             GROUP BY a.source_id',
+            "SELECT a.source_id, COUNT(*) AS n FROM articles a
+             WHERE a.published_at >= ? AND COALESCE(a.paywall_status, 'unknown') != 'paywalled'
+               AND NOT EXISTS (SELECT 1 FROM user_articles ua WHERE ua.article_id = a.id AND ua.seen = 1)
+             GROUP BY a.source_id",
             [$since]
         )->fetchAll();
         return array_map('intval', array_column($rows, 'n', 'source_id'));
@@ -230,8 +232,8 @@ final class Retrieval
         $findTitle = db()->prepare('SELECT id FROM articles WHERE source_id = ? AND title_hash = ? AND published_at >= ?');
         $fillGaps = db()->prepare('UPDATE articles SET image_url = COALESCE(image_url, ?), excerpt = COALESCE(excerpt, ?), author = COALESCE(author, ?) WHERE id = ?');
         $insert = db()->prepare(
-            'INSERT INTO articles (source_id, title, url, canonical_url, url_hash, title_hash, external_id, excerpt, image_url, author, published_at, language, category, categories_raw, tags, search_text, title_tokens, retrieved_at, created_at, updated_at)
-             VALUES (:source_id, :title, :url, :canonical_url, :url_hash, :title_hash, :external_id, :excerpt, :image_url, :author, :published_at, :language, :category, :categories_raw, :tags, :search_text, :title_tokens, :now, :now, :now)'
+            'INSERT INTO articles (source_id, title, url, canonical_url, url_hash, title_hash, external_id, excerpt, image_url, author, published_at, language, category, categories_raw, tags, search_text, title_tokens, paywall_status, paywall_reason, paywall_checked_at, retrieved_at, created_at, updated_at)
+             VALUES (:source_id, :title, :url, :canonical_url, :url_hash, :title_hash, :external_id, :excerpt, :image_url, :author, :published_at, :language, :category, :categories_raw, :tags, :search_text, :title_tokens, :paywall_status, :paywall_reason, :paywall_checked_at, :now, :now, :now)'
         );
         $setCluster = db()->prepare('UPDATE articles SET cluster_id = ? WHERE id = ?');
 
@@ -272,6 +274,9 @@ final class Retrieval
 
                 $category = Categories::classify(array_merge($item['categories'], $item['tags']), $item['url'], $source['default_category']);
                 $tokens = Clusterer::tokens($item['title']);
+                $wall = Paywall::fromFeed($item['title'], $item['excerpt'], $item['categories'] ?? [], $item['tags'] ?? []);
+                // Only auto-hide when the feed itself clearly labels premium; "likely" still enters the pool.
+                $paywallStatus = $wall['status'] === Paywall::PAYWALLED ? Paywall::PAYWALLED : Paywall::UNKNOWN;
                 $insert->execute([
                     'source_id' => $source['id'],
                     'title' => $item['title'],
@@ -290,6 +295,9 @@ final class Retrieval
                     'tags' => $item['tags'] ? json_encode($item['tags'], JSON_UNESCAPED_UNICODE) : null,
                     'search_text' => search_text($item['title'], (string) $item['excerpt'], implode(' ', $item['categories']), implode(' ', $item['tags'])),
                     'title_tokens' => implode(' ', $tokens),
+                    'paywall_status' => $paywallStatus,
+                    'paywall_reason' => $paywallStatus === Paywall::PAYWALLED ? $wall['reason'] : null,
+                    'paywall_checked_at' => $paywallStatus === Paywall::PAYWALLED ? $now : null,
                     'now' => $now,
                 ]);
                 $id = (int) db()->lastInsertId();

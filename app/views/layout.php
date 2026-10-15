@@ -24,6 +24,10 @@ $flashMessage = flash();
             'base' => base_path(),
             'csrf' => csrf_token(),
             'theme' => $theme,
+            'isAdmin' => !empty($user['is_admin']),
+            'filters' => isset($user['feed_filters']) && is_string($user['feed_filters']) && $user['feed_filters'] !== ''
+                ? (json_decode($user['feed_filters'], true) ?: new stdClass())
+                : new stdClass(),
         ], JSON_UNESCAPED_SLASHES) ?>;
     </script>
 </head>
@@ -40,6 +44,8 @@ $flashMessage = flash();
     <symbol id="i-logout" viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4M6 12h10"/></symbol>
     <symbol id="i-seen" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-3.5M4 4v4h4M4 13a8 8 0 0 0 14.9 3.5M20 20v-4h-4"/></symbol>
+    <symbol id="i-note" viewBox="0 0 24 24"><path d="M5 4.5h10l4 4V19.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-14a1 1 0 0 1 1-1z"/><path d="M15 4.5V9h4.5M8 12h8M8 16h6"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 19V5M4 19h16M8 17V11M12 17V8M16 17v-4"/></symbol>
 </svg>
 
 <?php if ($user): ?>
@@ -82,6 +88,7 @@ $flashMessage = flash();
         <a href="<?= e(url('saved')) ?>"><svg class="icon"><use href="#i-bookmark"/></svg>Saved articles</a>
         <a href="<?= e(url('seen')) ?>"><svg class="icon"><use href="#i-seen"/></svg>Seen articles</a>
         <?php if ($user['is_admin']): ?>
+            <a href="<?= e(url('admin/insights')) ?>"><svg class="icon"><use href="#i-chart"/></svg>Insights</a>
             <a href="<?= e(url('admin/sources')) ?>"><svg class="icon"><use href="#i-rss"/></svg>Sources</a>
         <?php endif; ?>
         <form method="post" action="<?= e(url('logout')) ?>">
@@ -89,6 +96,36 @@ $flashMessage = flash();
             <button type="submit"><svg class="icon"><use href="#i-logout"/></svg>Log out</button>
         </form>
     </nav>
+</dialog>
+
+<dialog class="sheet" id="note-dialog">
+    <div class="sheet-grip"></div>
+    <h2 id="note-dialog-title">Add a note</h2>
+    <p class="note-dialog-article muted" id="note-dialog-article" hidden></p>
+    <form id="note-form">
+        <div class="field">
+            <label for="note-text" class="sr-only">Note</label>
+            <textarea class="input" id="note-text" name="note" rows="5" maxlength="2000" placeholder="Why did you save this? Optional."></textarea>
+        </div>
+        <div class="sheet-actions">
+            <button class="btn" type="button" id="note-skip">Not now</button>
+            <button class="btn btn-primary" type="submit" id="note-save">Save note</button>
+        </div>
+    </form>
+</dialog>
+
+<dialog class="sheet" id="paywall-dialog">
+    <div class="sheet-grip"></div>
+    <h2>Possible paywall</h2>
+    <p class="note-dialog-article" id="paywall-dialog-article"></p>
+    <p class="hint" id="paywall-dialog-reason"></p>
+    <p class="hint">Briefly only peeks at the page — it does not try to get around the wall. If this is a false alarm, mark the source as safe so we stop checking it.</p>
+    <div class="sheet-actions paywall-actions">
+        <button class="btn btn-primary" type="button" id="paywall-proceed">Open anyway</button>
+        <button class="btn" type="button" id="paywall-safe">Not a paywall — mark source safe</button>
+        <button class="btn" type="button" id="paywall-remove">Remove article</button>
+        <button class="btn btn-danger" type="button" id="paywall-disable" hidden>Remove &amp; disable source</button>
+    </div>
 </dialog>
 <?php endif; ?>
 

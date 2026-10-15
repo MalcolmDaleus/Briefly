@@ -13,8 +13,14 @@ final class Api
             'limit' => (int) ($_GET['limit'] ?? config('feed_batch_size', 15)),
             'exclude' => $ids('exclude'),
             'context' => $ids('context'),
-            'category' => (string) ($_GET['category'] ?? ''),
             'q' => (string) ($_GET['q'] ?? ''),
+            'category' => (string) ($_GET['category'] ?? ''),
+            'category_mode' => (string) ($_GET['category_mode'] ?? 'include'),
+            'geo' => (string) ($_GET['geo'] ?? ''),
+            'geo_mode' => (string) ($_GET['geo_mode'] ?? 'include'),
+            'lang' => (string) ($_GET['lang'] ?? ''),
+            'lang_mode' => (string) ($_GET['lang_mode'] ?? 'include'),
+            'within' => (string) ($_GET['within'] ?? ''),
             'include_seen' => !empty($_GET['include_seen']),
         ];
         $limit = max(1, min(30, $opts['limit']));
@@ -59,12 +65,83 @@ final class Api
         json_out(['marked' => Feed::markSeen((int) $user['id'], (array) $ids)]);
     }
 
+    public static function opened(): void
+    {
+        $user = Auth::requireUser();
+        $data = request_json();
+        $ids = $data['ids'] ?? $data['id'] ?? [];
+        if (is_string($ids) || is_int($ids)) {
+            $ids = explode(',', (string) $ids);
+        }
+        json_out(['marked' => Feed::markOpened((int) $user['id'], (array) $ids)]);
+    }
+
     public static function save(): void
     {
         $user = Auth::requireUser();
         $data = request_json();
         $ok = Feed::setSaved((int) $user['id'], (int) ($data['id'] ?? 0), !empty($data['saved']));
         json_out(['ok' => $ok, 'saved' => !empty($data['saved'])], $ok ? 200 : 404);
+    }
+
+    public static function note(): void
+    {
+        $user = Auth::requireUser();
+        $data = request_json();
+        $id = (int) ($data['id'] ?? 0);
+        $note = (string) ($data['note'] ?? '');
+        $ok = Feed::setNote((int) $user['id'], $id, $note);
+        json_out(['ok' => $ok, 'note' => $ok ? (trim($note) === '' ? null : trim(mb_substr($note, 0, 2000))) : null], $ok ? 200 : 404);
+    }
+
+    public static function paywallCheck(): void
+    {
+        $user = Auth::requireUser();
+        $id = (int) (request_json()['id'] ?? 0);
+        $result = Feed::paywallCheck($id);
+        if (!$result) {
+            json_out(['error' => 'Not found'], 404);
+        }
+        json_out($result);
+    }
+
+    public static function dismiss(): void
+    {
+        $user = Auth::requireUser();
+        $data = request_json();
+        $id = (int) ($data['id'] ?? 0);
+        $mark = !empty($data['paywalled']);
+        $ok = Feed::dismiss((int) $user['id'], $id, $mark);
+        $disabled = false;
+        if ($ok && !empty($data['disable_source']) && !empty($user['is_admin'])) {
+            $sourceId = (int) q('SELECT source_id FROM articles WHERE id = ?', [$id])->fetchColumn();
+            if ($sourceId) {
+                Sources::setActive($sourceId, false);
+                $disabled = true;
+            }
+        }
+        json_out(['ok' => $ok, 'disabled_source' => $disabled], $ok ? 200 : 404);
+    }
+
+    public static function paywallSafe(): void
+    {
+        $user = Auth::requireUser();
+        $id = (int) (request_json()['id'] ?? 0);
+        $result = Feed::markSourceSafe($id);
+        if (!$result) {
+            json_out(['error' => 'Not found'], 404);
+        }
+        json_out(['ok' => true] + $result);
+    }
+
+    public static function filters(): void
+    {
+        $user = Auth::requireUser();
+        if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
+            json_out(['filters' => Feed::getUserFilters((int) $user['id'])]);
+        }
+        $saved = Feed::saveUserFilters((int) $user['id'], request_json());
+        json_out(['ok' => true, 'filters' => $saved]);
     }
 
     public static function theme(): void

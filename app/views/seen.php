@@ -16,7 +16,7 @@
     <?php else: ?>
         <div class="seen-list">
             <?php foreach ($articles as $a): ?>
-                <a class="seen-item" href="<?= e($a['url']) ?>" target="_blank" rel="noopener" data-geo="<?= e($a['geo_group']) ?>">
+                <a class="seen-item" href="<?= e($a['url']) ?>" target="_blank" rel="noopener" data-geo="<?= e($a['geo_group']) ?>" data-id="<?= (int) $a['id'] ?>" data-track-open="<?= (int) $a['id'] ?>">
                     <h2><?= e($a['title']) ?></h2>
                     <div class="saved-meta">
                         <?= e($a['source_name']) ?>

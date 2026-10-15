@@ -36,7 +36,7 @@ final class Auth
             self::$loaded = true;
             $id = $_SESSION['user_id'] ?? null;
             if ($id) {
-                $row = q('SELECT id, first_name, last_name, email, theme, is_admin FROM users WHERE id = ?', [$id])->fetch();
+                $row = q('SELECT id, first_name, last_name, email, theme, is_admin, feed_filters FROM users WHERE id = ?', [$id])->fetch();
                 self::$user = $row ?: null;
             }
         }
